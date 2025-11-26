@@ -100,6 +100,82 @@ function formatChunk(chunk: ChunkType, show_content: boolean) {
   return `.${path}${line_range} (${(chunk.score * 100).toFixed(2)}% match)${content ? `\n${content}` : ""}`;
 }
 
+interface JsonChunk {
+  type: string;
+  path: string;
+  score: number;
+  start_line?: number;
+  end_line?: number;
+  page?: number;
+  content?: string;
+}
+
+interface JsonSearchResult {
+  results: JsonChunk[];
+}
+
+interface JsonAskResult {
+  answer: string;
+  sources: JsonChunk[];
+}
+
+function chunkToJson(chunk: ChunkType, show_content: boolean): JsonChunk {
+  const pwd = process.cwd();
+  const rawPath =
+    (chunk.metadata as FileMetadata)?.path?.replace(pwd, "") ?? "Unknown path";
+
+  const base: JsonChunk = {
+    type: chunk.type ?? "unknown",
+    path: `.${rawPath}`,
+    score: chunk.score,
+  };
+
+  switch (chunk.type) {
+    case "text": {
+      const start_line = (chunk.generated_metadata?.start_line as number) + 1;
+      const end_line =
+        start_line + (chunk.generated_metadata?.num_lines as number);
+      base.start_line = start_line;
+      base.end_line = end_line;
+      if (show_content) {
+        base.content = chunk.text;
+      }
+      break;
+    }
+    case "image_url":
+      if (chunk.generated_metadata?.type === "pdf") {
+        base.page = chunk.chunk_index + 1;
+      }
+      break;
+  }
+
+  return base;
+}
+
+function formatSearchResponseJson(
+  response: SearchResponse,
+  show_content: boolean,
+): string {
+  const result: JsonSearchResult = {
+    results: response.data.map((chunk) => chunkToJson(chunk, show_content)),
+  };
+  return JSON.stringify(result, null, 2);
+}
+
+function formatAskResponseJson(
+  response: AskResponse,
+  show_content: boolean,
+): string {
+  const sources = extractSources(response);
+  const result: JsonAskResult = {
+    answer: response.answer,
+    sources: Object.values(sources).map((chunk) =>
+      chunkToJson(chunk, show_content),
+    ),
+  };
+  return JSON.stringify(result, null, 2);
+}
+
 function parseBooleanEnv(
   envVar: string | undefined,
   defaultValue: boolean,
@@ -143,6 +219,11 @@ export const search: Command = new CommanderCommand("search")
     "Disable reranking of search results",
     parseBooleanEnv(process.env.MGREP_RERANK, true), // `true` here means that reranking is enabled by default
   )
+  .option(
+    "--json",
+    "Output results as JSON",
+    parseBooleanEnv(process.env.MGREP_JSON, false),
+  )
   .argument("<pattern>", "The pattern to search for")
   .argument("[path]", "The path to search in")
   .allowUnknownOption(true)
@@ -156,6 +237,7 @@ export const search: Command = new CommanderCommand("search")
       sync: boolean;
       dryRun: boolean;
       rerank: boolean;
+      json: boolean;
     } = cmd.optsWithGlobals();
     if (exec_path?.startsWith("--")) {
       exec_path = "";
@@ -224,7 +306,9 @@ export const search: Command = new CommanderCommand("search")
             ],
           },
         );
-        response = formatSearchResponse(results, options.content);
+        response = options.json
+          ? formatSearchResponseJson(results, options.content)
+          : formatSearchResponse(results, options.content);
       } else {
         const results = await store.ask(
           options.store,
@@ -241,7 +325,9 @@ export const search: Command = new CommanderCommand("search")
             ],
           },
         );
-        response = formatAskResponse(results, options.content);
+        response = options.json
+          ? formatAskResponseJson(results, options.content)
+          : formatAskResponse(results, options.content);
       }
 
       console.log(response);
