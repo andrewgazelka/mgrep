@@ -1,3 +1,4 @@
+import { createInterface } from "node:readline";
 import { join, normalize } from "node:path";
 import type { Command } from "commander";
 import { Command as CommanderCommand } from "commander";
@@ -13,6 +14,59 @@ import {
   formatDryRunSummary,
 } from "../lib/sync-helpers";
 import { initialSync } from "../utils";
+
+interface StdinMatch {
+  lineNumber: number;
+  content: string;
+}
+
+async function readStdin(): Promise<string> {
+  const rl = createInterface({
+    input: process.stdin,
+    crlfDelay: Infinity,
+  });
+
+  const lines: string[] = [];
+  for await (const line of rl) {
+    lines.push(line);
+  }
+  return lines.join("\n");
+}
+
+function searchStdin(
+  content: string,
+  pattern: string,
+  caseInsensitive: boolean,
+): StdinMatch[] {
+  const lines = content.split("\n");
+  const flags = caseInsensitive ? "gi" : "g";
+  let regex: RegExp;
+
+  try {
+    regex = new RegExp(pattern, flags);
+  } catch {
+    // Fall back to literal string matching if pattern is not valid regex
+    const escapedPattern = pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    regex = new RegExp(escapedPattern, flags);
+  }
+
+  const matches: StdinMatch[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (regex.test(lines[i])) {
+      matches.push({
+        lineNumber: i + 1,
+        content: lines[i],
+      });
+    }
+    // Reset regex lastIndex for global flag
+    regex.lastIndex = 0;
+  }
+  return matches;
+}
+
+function formatStdinMatches(matches: StdinMatch[]): string {
+  return matches.map((m) => `${m.lineNumber}:${m.content}`).join("\n");
+}
 
 function extractSources(response: AskResponse): { [key: number]: ChunkType } {
   const sources: { [key: number]: ChunkType } = {};
@@ -156,9 +210,29 @@ export const search: Command = new CommanderCommand("search")
       sync: boolean;
       dryRun: boolean;
       rerank: boolean;
+      i: boolean;
     } = cmd.optsWithGlobals();
     if (exec_path?.startsWith("--")) {
       exec_path = "";
+    }
+
+    // Check if stdin is piped (not a TTY)
+    const isStdinPiped = !process.stdin.isTTY;
+
+    if (isStdinPiped) {
+      try {
+        const stdinContent = await readStdin();
+        const matches = searchStdin(stdinContent, pattern, options.i);
+        if (matches.length > 0) {
+          console.log(formatStdinMatches(matches));
+        }
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Unknown error";
+        console.error("Failed to search stdin:", message);
+        process.exitCode = 1;
+      }
+      return;
     }
 
     try {
